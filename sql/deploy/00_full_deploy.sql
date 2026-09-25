@@ -1330,6 +1330,11 @@ GO
 -- EXEC test_feature255.procUseProdInfrastructure;
 -- EXEC test_feature255.procResetEnvironment;
 -- DECLARE @RC INT, @SC INT, @Msg NVARCHAR(2048);
+-- Прямой вызов боевой процедуры oper без feature255-обертки.
+-- EXEC @RC = oper.procTransferMoney @OperationId='SMOKE-OPER-01', @N1='A', @N2='B', @S=10.00, @ResultCode=@RC OUTPUT, @StatusCode=@SC OUTPUT, @ResultMessage=@Msg OUTPUT;
+-- SELECT @RC AS ResultCode, @SC AS StatusCode, @Msg AS Message;
+
+-- Публичный вызов feature255, который использует инфраструктурные адаптеры oper.
 -- EXEC @RC = feature255.procTransferMoney @OperationId='SMOKE-01', @N1='A', @N2='B', @S=10.00, @ResultCode=@RC OUTPUT, @StatusCode=@SC OUTPUT, @ResultMessage=@Msg OUTPUT;
 -- SELECT @RC AS ResultCode, @SC AS StatusCode, @Msg AS Message;
 
