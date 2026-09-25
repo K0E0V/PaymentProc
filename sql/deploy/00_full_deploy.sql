@@ -715,41 +715,19 @@ BEGIN
     BEGIN TRY
         /*
           1. Базовая валидация входных параметров.
-          Любая ошибка здесь считается бизнес-ошибкой и фиксируется в журнале.
+          Все ошибки этого блока трактуются как бизнес-ошибки и возвращаются без лишних ветвлений.
         */
         IF @OperationId IS NULL OR @OperationId = ''
-        BEGIN
             SET @ReturnCode = -3000;
-            SET @ResultCode = @ReturnCode;
-            SET @StatusCode = feature255.fnGetOperationStatusCode(@ReturnCode);
-            SET @ResultMessage = feature255.fnGetOperationStatusMessage(@ReturnCode);
-            EXEC feature255.HandleTransferBusinessError @ErrorCode = @ReturnCode, @OperationId = @OperationId, @AccountFrom = @N1, @AccountTo = @N2, @Amount = @S;
-            RETURN @ResultCode;
-        END;
-
-        IF @N1 IS NULL OR @N1 = '' OR @N2 IS NULL OR @N2 = ''
-        BEGIN
+        ELSE IF @N1 IS NULL OR @N1 = '' OR @N2 IS NULL OR @N2 = ''
             SET @ReturnCode = -1004;
-            SET @ResultCode = @ReturnCode;
-            SET @StatusCode = feature255.fnGetOperationStatusCode(@ReturnCode);
-            SET @ResultMessage = feature255.fnGetOperationStatusMessage(@ReturnCode);
-            EXEC feature255.HandleTransferBusinessError @ErrorCode = @ReturnCode, @OperationId = @OperationId, @AccountFrom = @N1, @AccountTo = @N2, @Amount = @S;
-            RETURN @ResultCode;
-        END;
-
-        IF @S IS NULL OR @S <= 0
-        BEGIN
+        ELSE IF @S IS NULL OR @S <= 0
             SET @ReturnCode = -1003;
-            SET @ResultCode = @ReturnCode;
-            SET @StatusCode = feature255.fnGetOperationStatusCode(@ReturnCode);
-            SET @ResultMessage = feature255.fnGetOperationStatusMessage(@ReturnCode);
-            EXEC feature255.HandleTransferBusinessError @ErrorCode = @ReturnCode, @OperationId = @OperationId, @AccountFrom = @N1, @AccountTo = @N2, @Amount = @S;
-            RETURN @ResultCode;
-        END;
-
-        IF @N1 = @N2
-        BEGIN
+        ELSE IF @N1 = @N2
             SET @ReturnCode = -1005;
+
+        IF @ReturnCode <> 0
+        BEGIN
             SET @ResultCode = @ReturnCode;
             SET @StatusCode = feature255.fnGetOperationStatusCode(@ReturnCode);
             SET @ResultMessage = feature255.fnGetOperationStatusMessage(@ReturnCode);
@@ -794,24 +772,11 @@ BEGIN
           2 = операция уже выполняется в этот момент;
           0 = новая операция, продолжаем обработку.
         */
-        IF @IdempotencyStatus NOT IN (0, 1, 2)
-        BEGIN
-            IF @OuterTranCount = 0 ROLLBACK TRANSACTION;
-            ELSE IF @SavepointActive = 1 ROLLBACK TRANSACTION @Savepoint;
-            SET @ReturnCode = -3002;
-            SET @ResultCode = @ReturnCode;
-            SET @StatusCode = feature255.fnGetOperationStatusCode(@ReturnCode);
-            SET @ResultMessage = feature255.fnGetOperationStatusMessage(@ReturnCode);
-            EXEC feature255.HandleIdempotencyConflict @OperationId = @OperationId, @ErrorCode = @ReturnCode;
-            RETURN @ResultCode;
-        END;
-
         IF @IdempotencyStatus = 1
         BEGIN
             IF @OuterTranCount = 0 ROLLBACK TRANSACTION;
             ELSE IF @SavepointActive = 1 ROLLBACK TRANSACTION @Savepoint;
 
-            /* Повторный вызов с тем же ключом: возвращаем результат предыдущего успешного выполнения. */
             EXEC @ReturnCode = feature255.WriteIdempotentReplayLog @OperationId = @OperationId, @PreviousResultCode = @PreviousResult;
             IF @ReturnCode <> 0
             BEGIN
@@ -840,6 +805,18 @@ BEGIN
             RETURN @ResultCode;
         END;
 
+        IF @IdempotencyStatus NOT IN (0, 1, 2)
+        BEGIN
+            IF @OuterTranCount = 0 ROLLBACK TRANSACTION;
+            ELSE IF @SavepointActive = 1 ROLLBACK TRANSACTION @Savepoint;
+            SET @ReturnCode = -3002;
+            SET @ResultCode = @ReturnCode;
+            SET @StatusCode = feature255.fnGetOperationStatusCode(@ReturnCode);
+            SET @ResultMessage = feature255.fnGetOperationStatusMessage(@ReturnCode);
+            EXEC feature255.HandleIdempotencyConflict @OperationId = @OperationId, @ErrorCode = @ReturnCode;
+            RETURN @ResultCode;
+        END;
+
         /*
           4. Блокировка счетов и проверка фактического состояния.
           Это защищает перевод от races и несогласованного состояния счетов.
@@ -856,22 +833,14 @@ BEGIN
         END;
 
         IF NOT EXISTS (SELECT 1 FROM oper.T WITH (UPDLOCK) WHERE N = @N1)
-        BEGIN
-            IF @OuterTranCount = 0 ROLLBACK TRANSACTION;
-            ELSE IF @SavepointActive = 1 ROLLBACK TRANSACTION @Savepoint;
             SET @ReturnCode = -1001;
-            SET @ResultCode = @ReturnCode;
-            SET @StatusCode = feature255.fnGetOperationStatusCode(@ReturnCode);
-            SET @ResultMessage = feature255.fnGetOperationStatusMessage(@ReturnCode);
-            EXEC feature255.HandleTransferBusinessError @ErrorCode = @ReturnCode, @OperationId = @OperationId, @AccountFrom = @N1, @AccountTo = @N2, @Amount = @S;
-            RETURN @ResultCode;
-        END;
+        ELSE IF NOT EXISTS (SELECT 1 FROM oper.T WITH (UPDLOCK) WHERE N = @N2)
+            SET @ReturnCode = -1002;
 
-        IF NOT EXISTS (SELECT 1 FROM oper.T WITH (UPDLOCK) WHERE N = @N2)
+        IF @ReturnCode <> 0
         BEGIN
             IF @OuterTranCount = 0 ROLLBACK TRANSACTION;
             ELSE IF @SavepointActive = 1 ROLLBACK TRANSACTION @Savepoint;
-            SET @ReturnCode = -1002;
             SET @ResultCode = @ReturnCode;
             SET @StatusCode = feature255.fnGetOperationStatusCode(@ReturnCode);
             SET @ResultMessage = feature255.fnGetOperationStatusMessage(@ReturnCode);
