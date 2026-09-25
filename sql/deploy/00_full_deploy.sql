@@ -99,6 +99,13 @@ GO
 /* ---------------------------------------------------------------------------
    3. ИНФРАСТРУКТУРА OPER: АДАПТЕРЫ / ПРОЦЕДУРЫ
    --------------------------------------------------------------------------- */
+
+/*
+  IdempotencyBegin:
+  - регистрирует идентификатор операции;
+  - при повторном вызове возвращает текущее состояние и предыдущий результат;
+  - позволяет защититься от двойного выполнения одной и той же операции.
+*/
 CREATE OR ALTER PROCEDURE oper.IdempotencyBegin
     @OperationId VARCHAR(64),
     @OperationType VARCHAR(20),
@@ -266,6 +273,14 @@ GO
 /* ---------------------------------------------------------------------------
    4. ИНФРАСТРУКТУРА OPER: ГЛАВНАЯ БОЕВАЯ ПРОЦЕДУРА
    --------------------------------------------------------------------------- */
+
+/*
+  oper.procTransferMoney:
+  - валидирует входные параметры;
+  - запускает идемпотентность и блокировки;
+  - перечитывает фактическое состояние счетов;
+  - выполняет перевод и фиксирует результат в журнале.
+*/
 CREATE OR ALTER PROCEDURE oper.procTransferMoney
     @OperationId VARCHAR(64),
     @N1 VARCHAR(20),
@@ -666,6 +681,13 @@ GO
 /* ---------------------------------------------------------------------------
    7. FEATURE255: ОСНОВНАЯ ПРОЦЕДУРА ПЕРЕВОДА
    --------------------------------------------------------------------------- */
+
+/*
+  feature255.procTransferMoney:
+  - представляет внешнюю точку входа feature;
+  - использует инфраструктурные адаптеры через синонимы;
+  - возвращает контрактный ResultCode / StatusCode / ResultMessage.
+*/
 CREATE OR ALTER PROCEDURE feature255.procTransferMoney
     @OperationId VARCHAR(64),
     @N1 VARCHAR(20),
@@ -691,6 +713,10 @@ BEGIN
     SET @ResultMessage = N'Системная ошибка. Повторите позже или обратитесь в поддержку.';
 
     BEGIN TRY
+        /*
+          1. Базовая валидация входных параметров.
+          Любая ошибка здесь считается бизнес-ошибкой и фиксируется в журнале.
+        */
         IF @OperationId IS NULL OR @OperationId = ''
         BEGIN
             SET @ReturnCode = -3000;
@@ -731,6 +757,10 @@ BEGIN
             RETURN @ResultCode;
         END;
 
+        /*
+          2. Поднимаем транзакцию и запускаем идемпотентность.
+          Если операция уже была зафиксирована, возвращаем её прошлый результат.
+        */
         IF @OuterTranCount = 0
             BEGIN TRANSACTION;
         ELSE
@@ -758,6 +788,12 @@ BEGIN
             RETURN @ResultCode;
         END;
 
+        /*
+          3. Обработка статуса идемпотентности:
+          1 = операция уже завершена ранее;
+          2 = операция уже выполняется в этот момент;
+          0 = новая операция, продолжаем обработку.
+        */
         IF @IdempotencyStatus NOT IN (0, 1, 2)
         BEGIN
             IF @OuterTranCount = 0 ROLLBACK TRANSACTION;
@@ -775,6 +811,7 @@ BEGIN
             IF @OuterTranCount = 0 ROLLBACK TRANSACTION;
             ELSE IF @SavepointActive = 1 ROLLBACK TRANSACTION @Savepoint;
 
+            /* Повторный вызов с тем же ключом: возвращаем результат предыдущего успешного выполнения. */
             EXEC @ReturnCode = feature255.WriteIdempotentReplayLog @OperationId = @OperationId, @PreviousResultCode = @PreviousResult;
             IF @ReturnCode <> 0
             BEGIN
@@ -803,6 +840,10 @@ BEGIN
             RETURN @ResultCode;
         END;
 
+        /*
+          4. Блокировка счетов и проверка фактического состояния.
+          Это защищает перевод от races и несогласованного состояния счетов.
+        */
         EXEC @ReturnCode = feature255.LockTransferAccounts @AccountFrom = @N1, @AccountTo = @N2;
         IF @ReturnCode <> 0
         BEGIN
@@ -838,6 +879,7 @@ BEGIN
             RETURN @ResultCode;
         END;
 
+        /* Списываем сумму со счета отправителя и проверяем, хватило ли средств. */
         UPDATE oper.T
         SET S = S - @S
         WHERE N = @N1 AND S >= @S;
@@ -854,6 +896,7 @@ BEGIN
             RETURN @ResultCode;
         END;
 
+        /* Зачисляем средства на счет получателя после успешного списания. */
         UPDATE oper.T
         SET S = S + @S
         WHERE N = @N2;
@@ -870,6 +913,10 @@ BEGIN
             RETURN @ResultCode;
         END;
 
+        /*
+          5. Фиксируем бизнес-результат и завершение операции в идемпотентной подсистеме.
+          Только после этого операция считается успешно завершённой.
+        */
         EXEC @ReturnCode = feature255.WriteBusinessLog
             @OperationType = 'TRANSFER',
             @OperationId = @OperationId,
@@ -899,6 +946,7 @@ BEGIN
             RETURN @ResultCode;
         END;
 
+        /* Коммит только после успешного завершения всей бизнес-логики. */
         IF @OuterTranCount = 0
             COMMIT TRANSACTION;
 
@@ -909,6 +957,10 @@ BEGIN
         RETURN 0;
     END TRY
     BEGIN CATCH
+        /*
+          6. Системная ошибка: логируем исключение и возвращаем контрактный код ошибки.
+          Бизнес-исключения уже обработаны на предыдущих шагах.
+        */
         DECLARE @ErrorNumber INT = ERROR_NUMBER();
         DECLARE @ErrorMessage NVARCHAR(4000) = ERROR_MESSAGE();
 
@@ -1081,6 +1133,11 @@ GO
 /* ---------------------------------------------------------------------------
    9. TEST_FEATURE255: ЗАГЛУШКИ АДАПТЕРОВ
    --------------------------------------------------------------------------- */
+
+/*
+  Тестовые заглушки имитируют поведение внешних адаптеров и позволяют
+  проверять ветвления в основной процедуре без реального вызова инфраструктуры.
+*/
 CREATE OR ALTER PROCEDURE test_feature255.IdempotencyBegin
     @OperationId VARCHAR(64),
     @OperationType VARCHAR(20),
